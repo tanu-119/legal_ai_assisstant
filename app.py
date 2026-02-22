@@ -1,17 +1,6 @@
-import chromadb
-from chromadb.config import Settings as ChromaSettings
-# --- 0. STREAMLIT CLOUD SQLITE FIX (MUST BE AT THE VERY TOP) ---
-import sys
-try:
-    __import__('pysqlite3')
-    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-except ImportError:
-    pass
-
 import streamlit as st
 import json
 import os
-import glob
 
 # Official v0.3+ Import Paths
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -23,47 +12,28 @@ from langchain_core.documents import Document
 from langchain.prompts import PromptTemplate
 
 # --- 1. SETTINGS & INITIALIZATION ---
-# Access the key securely from Streamlit Cloud Secrets
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+# NOTE: Please generate a new key on Groq and keep it private!
+GROQ_API_KEY = "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" 
 st.set_page_config(page_title="Legal AI Assistant", layout="wide")
 
 # --- 2. DATA PROCESSING ---
 def load_and_process_data():
     documents = []
     
-    # Process ALL split judgement files (judgements_part_1.json, etc.)
-    judgement_files = glob.glob("judgements_part_*.json")
-    
-    if not judgement_files:
-        st.warning("No split judgement files found. Please ensure you ran the split script.")
-    
-    for filename in judgement_files:
-        with open(filename, 'r', encoding='utf-8') as f:
+    if os.path.exists('judgements.json'):
+        with open('judgements.json', 'r', encoding='utf-8') as f:
             judgements = json.load(f)
             for j in judgements:
-                # Combine fields into a single searchable text
-                text = f"Title: {j.get('title', 'Unknown')}\n" \
-                       f"Act: {j.get('act', 'N/A')}\n" \
-                       f"Judge: {j.get('judge', 'N/A')}\n" \
-                       f"Headnote: {' '.join(j.get('headnote_sent', []))}"
-                
-                documents.append(Document(
-                    page_content=text, 
-                    metadata={"source": filename, "id": j.get('case_id', 'N/A')}
-                ))
+                text = f"Title: {j['title']}\nAct: {j['act']}\nJudge: {j['judge']}\nHeadnote: {' '.join(j['headnote_sent'])}"
+                documents.append(Document(page_content=text, metadata={"source": "judgements.json", "id": j.get('case_id', 'N/A')}))
     
-    # Process IPC Sections
     if os.path.exists('ipc_sections.json'):
         with open('ipc_sections.json', 'r', encoding='utf-8') as f:
             ipc = json.load(f)
             if isinstance(ipc, dict): ipc = [ipc]
             for item in ipc:
-                text = f"Section {item.get('Section')}: {item.get('section_title')}\n" \
-                       f"Description: {item.get('section_desc')}"
-                documents.append(Document(
-                    page_content=text, 
-                    metadata={"source": "ipc_sections.json"}
-                ))
+                text = f"Section {item.get('Section')}: {item.get('section_title')}\nDescription: {item.get('section_desc')}"
+                documents.append(Document(page_content=text, metadata={"source": "ipc_sections.json"}))
                 
     return documents
 
@@ -73,56 +43,18 @@ def setup_qa_chain():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     persist_directory = "./legal_db_index"
     
-    # 1. Direct initialization to satisfy Chroma's internal validation
-    # We explicitly define the tenant and database to avoid the ValueError
-    client = chromadb.Client(ChromaSettings(
-        is_persistent=True,
-        persist_directory=persist_directory,
-        anonymized_telemetry=False,
-        default_tenant="default_tenant",
-        default_database="default_database"
-    ))
-
-    try:
-        # Check if the collection already exists in the persistent storage
-        collections = client.list_collections()
-        collection_names = [c.name for c in collections]
-        
-        if "legal_collection" in collection_names:
-            vectorstore = Chroma(
-                client=client,
-                collection_name="legal_collection",
-                embedding_function=embeddings,
-            )
-        else:
-            vectorstore = None
-    except Exception:
-        vectorstore = None
-
-    # 2. Build and Index if this is the first time running on the server
-    if vectorstore is None:
+    if os.path.exists(persist_directory):
+        vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+    else:
         docs = load_and_process_data()
-        if not docs:
-            st.error("No documents found to index!")
-            st.stop()
-            
-        with st.status("Initializing Legal Database...", expanded=True) as status:
-            # Create the vectorstore from the first 10 docs to establish the schema
-            vectorstore = Chroma.from_documents(
-                documents=docs[:10],
-                embedding=embeddings,
-                client=client,
-                collection_name="legal_collection"
-            )
-            
-            # Batch upload the remaining documents to prevent memory timeout
-            batch_size = 500 
-            for i in range(10, len(docs), batch_size):
+        batch_size = 5000 
+        vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+        with st.status("Indexing documents...", expanded=True) as status:
+            for i in range(0, len(docs), batch_size):
                 batch = docs[i : i + batch_size]
                 vectorstore.add_documents(batch)
             status.update(label="Indexing Complete!", state="complete")
     
-    # --- LLM and Chain Configuration ---
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
         model_name="llama-3.1-8b-instant", 
@@ -137,9 +69,15 @@ def setup_qa_chain():
 
     custom_template = """You are a helpful Indian Legal Assistant. 
     Use the following pieces of retrieved context to answer the user's question.
+    - If the context contains a relevant IPC Section or Court Case, explain it in simple language.
+    - Always cite the Section number or Case title clearly.
+    - If the user asks a follow-up question, use the Chat History to maintain context.
+    - If you cannot find the answer in the context, inform the user you don't have that specific record and suggest consulting a lawyer.
+
     Context: {context}
     Chat History: {chat_history}
     Question: {question}
+    
     Helpful Legal Response:"""
     
     CUSTOM_PROMPT = PromptTemplate(
@@ -154,6 +92,7 @@ def setup_qa_chain():
         combine_docs_chain_kwargs={"prompt": CUSTOM_PROMPT},
         return_source_documents=True
     )
+
 # --- 4. STREAMLIT UI ---
 st.title("⚖️ Indian Legal Assistant")
 st.markdown("Providing legal clarity for the common man using IPC and Case Law data.")
@@ -161,22 +100,23 @@ st.markdown("Providing legal clarity for the common man using IPC and Case Law d
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Initialize the Bot
-qa_bot = setup_qa_chain()
+try:
+    qa_bot = setup_qa_chain()
+except Exception as e:
+    st.error(f"Error initializing: {e}")
+    st.stop()
 
 # Sidebar for controls
 with st.sidebar:
-    st.info("Ask about IPC sections or search for previous court judgements.")
     if st.button("Clear Conversation"):
         st.session_state.messages = []
         st.rerun()
 
-# Display Chat History
+# Display Chat
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# User Input
 if prompt := st.chat_input("Ask a legal question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -184,16 +124,12 @@ if prompt := st.chat_input("Ask a legal question..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Analyzing legal records..."):
-            try:
-                response = qa_bot({"question": prompt})
-                answer = response['answer']
-                st.markdown(answer)
-                
-                with st.expander("Show Legal Sources Used"):
-                    for doc in response['source_documents']:
-                        source_name = doc.metadata.get('source', 'Unknown')
-                        st.info(f"**Source:** {source_name}\n\n{doc.page_content[:400]}...")
-                
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
+            response = qa_bot({"question": prompt})
+            answer = response['answer']
+            st.markdown(answer)
+            
+            with st.expander("Show Legal Sources Used"):
+                for doc in response['source_documents']:
+                    st.info(f"Source: {doc.metadata['source']}\n\n{doc.page_content[:400]}...")
+
+    st.session_state.messages.append({"role": "assistant", "content": answer})
