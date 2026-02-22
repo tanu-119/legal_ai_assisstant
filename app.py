@@ -18,7 +18,7 @@ from langchain.prompts import PromptTemplate
 
 # --- 1. SETTINGS & INITIALIZATION ---
 # NOTE: Please generate a new key on Groq and keep it private!
-GROQ_API_KEY = "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" 
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 st.set_page_config(page_title="Legal AI Assistant", layout="wide")
 
 # --- 2. DATA PROCESSING ---
@@ -41,49 +41,52 @@ def load_and_process_data():
                 documents.append(Document(page_content=text, metadata={"source": "ipc_sections.json"}))
                 
     return documents
-
 # --- 3. BUILD THE BOT ENGINE ---
 @st.cache_resource 
 def setup_qa_chain():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     persist_directory = "./legal_db_index"
     
-    # 1. Initialize the client simply. 
-    # Do not pass 'Settings' objects here to avoid Pydantic validation errors.
     import chromadb
     client = chromadb.PersistentClient(path=persist_directory)
 
-    # 2. Use the LangChain wrapper with the existing client
-    # We use 'legal_collection' to ensure consistency
-    vectorstore = Chroma(
-        client=client,
-        collection_name="legal_collection",
-        embedding_function=embeddings,
-    )
-
-    # 3. Check if we need to add data
-    # client.list_collections() returns a list of Collection objects
+    # 1. Check if the collection exists and has data
+    collection_name = "legal_collection"
     collections = client.list_collections()
-    is_empty = True
-    for col in collections:
-        if col.name == "legal_collection" and col.count() > 0:
-            is_empty = False
-            break
+    exists_and_filled = any(col.name == collection_name and col.count() > 0 for col in collections)
 
-    if is_empty:
+    if not exists_and_filled:
         docs = load_and_process_data()
         if not docs:
-            st.error("No documents found to index!")
+            st.error("No documents found! Please check if judgements.json and ipc_sections.json exist.")
             st.stop()
             
-        with st.status("Indexing legal records...", expanded=True) as status:
+        with st.status("First-time setup: Indexing legal records...", expanded=True) as status:
+            # Create the vectorstore AND add documents in one go for the first time
+            vectorstore = Chroma.from_documents(
+                documents=docs[:100], # Start with a small batch to initialize
+                embedding=embeddings,
+                client=client,
+                collection_name=collection_name,
+                persist_directory=persist_directory
+            )
+            
+            # Add the rest in batches
             batch_size = 500 
-            for i in range(0, len(docs), batch_size):
+            for i in range(100, len(docs), batch_size):
                 batch = docs[i : i + batch_size]
                 vectorstore.add_documents(batch)
             status.update(label="Indexing Complete!", state="complete")
-    
+    else:
+        # Load the existing vectorstore
+        vectorstore = Chroma(
+            client=client,
+            collection_name=collection_name,
+            embedding_function=embeddings,
+        )
+
     # --- LLM and Chain Logic ---
+    # Using st.secrets is highly recommended over hardcoding
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
         model_name="llama-3.1-8b-instant", 
