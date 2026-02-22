@@ -48,45 +48,51 @@ def setup_qa_chain():
     persist_directory = "./legal_db_index"
     
     import chromadb
-    client = chromadb.PersistentClient(path=persist_directory)
+    from chromadb.config import Settings
+    
+    # Force the client to use the default tenant and database settings
+    client = chromadb.PersistentClient(
+        path=persist_directory,
+        settings=Settings(
+            allow_reset=True,
+            anonymized_telemetry=False,
+            is_persistent=True,
+        )
+    )
 
-    # 1. Check if the collection exists and has data
     collection_name = "legal_collection"
-    collections = client.list_collections()
-    exists_and_filled = any(col.name == collection_name and col.count() > 0 for col in collections)
+    
+    # Try to get the collection, or create it if it doesn't exist
+    try:
+        # This is more robust than list_collections check
+        collection = client.get_or_create_collection(name=collection_name)
+        count = collection.count()
+    except Exception:
+        count = 0
 
-    if not exists_and_filled:
+    if count == 0:
         docs = load_and_process_data()
         if not docs:
-            st.error("No documents found! Please check if judgements.json and ipc_sections.json exist.")
+            st.error("No documents found to index!")
             st.stop()
             
-        with st.status("First-time setup: Indexing legal records...", expanded=True) as status:
-            # Create the vectorstore AND add documents in one go for the first time
+        with st.status("Indexing documents (this may take a minute)...", expanded=True) as status:
             vectorstore = Chroma.from_documents(
-                documents=docs[:100], # Start with a small batch to initialize
+                documents=docs,
                 embedding=embeddings,
                 client=client,
                 collection_name=collection_name,
                 persist_directory=persist_directory
             )
-            
-            # Add the rest in batches
-            batch_size = 500 
-            for i in range(100, len(docs), batch_size):
-                batch = docs[i : i + batch_size]
-                vectorstore.add_documents(batch)
             status.update(label="Indexing Complete!", state="complete")
     else:
-        # Load the existing vectorstore
         vectorstore = Chroma(
             client=client,
             collection_name=collection_name,
             embedding_function=embeddings,
         )
 
-    # --- LLM and Chain Logic ---
-    # Using st.secrets is highly recommended over hardcoding
+    # --- Rest of your LLM / Chain Logic remains the same ---
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
         model_name="llama-3.1-8b-instant", 
@@ -99,23 +105,10 @@ def setup_qa_chain():
         output_key='answer'
     )
 
-    custom_template = """You are a helpful Indian Legal Assistant. 
-    Use the following pieces of retrieved context to answer the user's question.
-    Context: {context}
-    Chat History: {chat_history}
-    Question: {question}
-    Helpful Legal Response:"""
-    
-    CUSTOM_PROMPT = PromptTemplate(
-        template=custom_template, 
-        input_variables=["context", "chat_history", "question"]
-    )
-    
     return ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
         memory=memory,
-        combine_docs_chain_kwargs={"prompt": CUSTOM_PROMPT},
         return_source_documents=True
     )
 # --- 4. STREAMLIT UI ---
