@@ -76,7 +76,6 @@ def setup_qa_chain():
             st.error("No documents found to index!")
             st.stop()
             
-        with st.status("Indexing documents (this may take a minute)...", expanded=True) as status:
             vectorstore = Chroma.from_documents(
                 documents=docs,
                 embedding=embeddings,
@@ -84,7 +83,6 @@ def setup_qa_chain():
                 collection_name=collection_name,
                 persist_directory=persist_directory
             )
-            status.update(label="Indexing Complete!", state="complete")
     else:
         vectorstore = Chroma(
             client=client,
