@@ -20,16 +20,20 @@ st.set_page_config(page_title="Legal AI Assistant", layout="wide")
 def load_and_process_data():
     documents = []
     
-    if os.path.exists('judgements.json'):
-        with open('judgements.json', 'r', encoding='utf-8') as f:
-            judgements = json.load(f)
-            for j in judgements:
-                text = f"Title: {j['title']}\nAct: {j['act']}\nJudge: {j['judge']}\nHeadnote: {' '.join(j['headnote_sent'])}"
-                documents.append(Document(page_content=text, metadata={"source": "judgements.json", "id": j.get('case_id', 'N/A')}))
+    # Process ALL split judgement files
+    for filename in os.listdir():
+        if filename.startswith('judgements_part_') and filename.endswith('.json'):
+            with open(filename, 'r', encoding='utf-8') as f:
+                judgements = json.load(f)
+                for j in judgements:
+                    text = f"Title: {j['title']}\nAct: {j['act']}\nJudge: {j['judge']}\nHeadnote: {' '.join(j['headnote_sent'])}"
+                    documents.append(Document(page_content=text, metadata={"source": filename, "id": j.get('case_id', 'N/A')}))
     
+    # Process IPC Sections (stays the same)
     if os.path.exists('ipc_sections.json'):
         with open('ipc_sections.json', 'r', encoding='utf-8') as f:
             ipc = json.load(f)
+            # ... rest of your IPC code
             if isinstance(ipc, dict): ipc = [ipc]
             for item in ipc:
                 text = f"Section {item.get('Section')}: {item.get('section_title')}\nDescription: {item.get('section_desc')}"
