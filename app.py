@@ -69,30 +69,20 @@ def load_and_process_data():
     return documents
 
 # --- 3. BUILD THE BOT ENGINE ---
-
-
 @st.cache_resource 
 def setup_qa_chain():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     persist_directory = "./legal_db_index"
     
-    # 1. Manually initialize the PersistentClient to bypass the ValueError
-    client = chromadb.PersistentClient(
-        path=persist_directory,
-        settings=Settings(
-            allow_reset=True,
-            anonymized_telemetry=False,
-            is_persistent=True,
-            # These two defaults often fix the 'tenant' ValueError
-            default_tenant="default_tenant",
-            default_database="default_database"
-        )
-    )
+    # 1. Use the most stable initialization for Streamlit Cloud
+    # We remove 'is_persistent' and 'allow_reset' to avoid Pydantic errors
+    client = chromadb.PersistentClient(path=persist_directory)
 
-    # 2. Link the client to LangChain's Chroma wrapper
     try:
-        # Check if we already have data
-        collection_names = [c.name for c in client.list_collections()]
+        # Check if collection exists
+        collections = client.list_collections()
+        collection_names = [c.name for c in collections]
+        
         if "legal_collection" in collection_names:
             vectorstore = Chroma(
                 client=client,
@@ -104,7 +94,7 @@ def setup_qa_chain():
     except Exception:
         vectorstore = None
 
-    # 3. Create and Index if necessary
+    # 2. Rebuild if vectorstore is None
     if vectorstore is None:
         docs = load_and_process_data()
         if not docs:
@@ -112,9 +102,8 @@ def setup_qa_chain():
             st.stop()
             
         with st.status("Initializing Legal Database...", expanded=True) as status:
-            # Use the client directly in from_documents
             vectorstore = Chroma.from_documents(
-                documents=docs[:10], # Seed with first 10
+                documents=docs[:10], 
                 embedding=embeddings,
                 client=client,
                 collection_name="legal_collection"
@@ -127,7 +116,7 @@ def setup_qa_chain():
                 vectorstore.add_documents(batch)
             status.update(label="Indexing Complete!", state="complete")
     
-    # --- LLM and Chain Configuration ---
+    # --- LLM and Chain Configuration remains the same ---
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
         model_name="llama-3.1-8b-instant", 
