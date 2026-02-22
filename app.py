@@ -1,6 +1,5 @@
 import chromadb
-from chromadb.config import Settings
-
+from chromadb.config import Settings as ChromaSettings
 # --- 0. STREAMLIT CLOUD SQLITE FIX (MUST BE AT THE VERY TOP) ---
 import sys
 try:
@@ -74,12 +73,18 @@ def setup_qa_chain():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     persist_directory = "./legal_db_index"
     
-    # 1. Use the most stable initialization for Streamlit Cloud
-    # We remove 'is_persistent' and 'allow_reset' to avoid Pydantic errors
-    client = chromadb.PersistentClient(path=persist_directory)
+    # 1. Direct initialization to satisfy Chroma's internal validation
+    # We explicitly define the tenant and database to avoid the ValueError
+    client = chromadb.Client(ChromaSettings(
+        is_persistent=True,
+        persist_directory=persist_directory,
+        anonymized_telemetry=False,
+        default_tenant="default_tenant",
+        default_database="default_database"
+    ))
 
     try:
-        # Check if collection exists
+        # Check if the collection already exists in the persistent storage
         collections = client.list_collections()
         collection_names = [c.name for c in collections]
         
@@ -94,7 +99,7 @@ def setup_qa_chain():
     except Exception:
         vectorstore = None
 
-    # 2. Rebuild if vectorstore is None
+    # 2. Build and Index if this is the first time running on the server
     if vectorstore is None:
         docs = load_and_process_data()
         if not docs:
@@ -102,21 +107,22 @@ def setup_qa_chain():
             st.stop()
             
         with st.status("Initializing Legal Database...", expanded=True) as status:
+            # Create the vectorstore from the first 10 docs to establish the schema
             vectorstore = Chroma.from_documents(
-                documents=docs[:10], 
+                documents=docs[:10],
                 embedding=embeddings,
                 client=client,
                 collection_name="legal_collection"
             )
             
-            # Batch upload the remaining documents
+            # Batch upload the remaining documents to prevent memory timeout
             batch_size = 500 
             for i in range(10, len(docs), batch_size):
                 batch = docs[i : i + batch_size]
                 vectorstore.add_documents(batch)
             status.update(label="Indexing Complete!", state="complete")
     
-    # --- LLM and Chain Configuration remains the same ---
+    # --- LLM and Chain Configuration ---
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
         model_name="llama-3.1-8b-instant", 
