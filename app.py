@@ -1,3 +1,6 @@
+import chromadb
+from chromadb.config import Settings
+
 # --- 0. STREAMLIT CLOUD SQLITE FIX (MUST BE AT THE VERY TOP) ---
 import sys
 try:
@@ -66,50 +69,65 @@ def load_and_process_data():
     return documents
 
 # --- 3. BUILD THE BOT ENGINE ---
+
+
 @st.cache_resource 
 def setup_qa_chain():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     persist_directory = "./legal_db_index"
     
-    # 1. Use the most basic Chroma initialization to avoid Tenant/Database ValueErrors
-    if os.path.exists(persist_directory):
-        try:
+    # 1. Manually initialize the PersistentClient to bypass the ValueError
+    client = chromadb.PersistentClient(
+        path=persist_directory,
+        settings=Settings(
+            allow_reset=True,
+            anonymized_telemetry=False,
+            is_persistent=True,
+            # These two defaults often fix the 'tenant' ValueError
+            default_tenant="default_tenant",
+            default_database="default_database"
+        )
+    )
+
+    # 2. Link the client to LangChain's Chroma wrapper
+    try:
+        # Check if we already have data
+        collection_names = [c.name for c in client.list_collections()]
+        if "legal_collection" in collection_names:
             vectorstore = Chroma(
-                persist_directory=persist_directory, 
-                embedding_function=embeddings
+                client=client,
+                collection_name="legal_collection",
+                embedding_function=embeddings,
             )
-        except Exception:
-            # If it fails to load, we'll force a rebuild
-            import shutil
-            shutil.rmtree(persist_directory)
+        else:
             vectorstore = None
-    else:
+    except Exception:
         vectorstore = None
 
-    # 2. Rebuild if vectorstore is None
+    # 3. Create and Index if necessary
     if vectorstore is None:
         docs = load_and_process_data()
         if not docs:
             st.error("No documents found to index!")
             st.stop()
             
-        # Create a fresh vectorstore
-        vectorstore = Chroma.from_documents(
-            documents=docs[:10], # Start with a small batch to test
-            embedding=embeddings,
-            persist_directory=persist_directory
-        )
-        
-        # Add the rest in batches
-        with st.status("Indexing legal records...", expanded=True) as status:
+        with st.status("Initializing Legal Database...", expanded=True) as status:
+            # Use the client directly in from_documents
+            vectorstore = Chroma.from_documents(
+                documents=docs[:10], # Seed with first 10
+                embedding=embeddings,
+                client=client,
+                collection_name="legal_collection"
+            )
+            
+            # Batch upload the remaining documents
             batch_size = 500 
             for i in range(10, len(docs), batch_size):
                 batch = docs[i : i + batch_size]
                 vectorstore.add_documents(batch)
             status.update(label="Indexing Complete!", state="complete")
     
-    # ... rest of your code (llm, memory, prompt, etc.) ...
-    
+    # --- LLM and Chain Configuration ---
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
         model_name="llama-3.1-8b-instant", 
@@ -124,15 +142,9 @@ def setup_qa_chain():
 
     custom_template = """You are a helpful Indian Legal Assistant. 
     Use the following pieces of retrieved context to answer the user's question.
-    - Explain relevant IPC Sections or Court Cases in simple language.
-    - Always cite the Section number or Case title clearly.
-    - Use the Chat History to maintain context for follow-up questions.
-    - If the answer isn't in the context, politely suggest consulting a lawyer.
-
     Context: {context}
     Chat History: {chat_history}
     Question: {question}
-    
     Helpful Legal Response:"""
     
     CUSTOM_PROMPT = PromptTemplate(
@@ -147,7 +159,6 @@ def setup_qa_chain():
         combine_docs_chain_kwargs={"prompt": CUSTOM_PROMPT},
         return_source_documents=True
     )
-
 # --- 4. STREAMLIT UI ---
 st.title("⚖️ Indian Legal Assistant")
 st.markdown("Providing legal clarity for the common man using IPC and Case Law data.")
