@@ -43,18 +43,42 @@ def setup_qa_chain():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     persist_directory = "./legal_db_index"
     
-    if os.path.exists(persist_directory):
-        vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-    else:
+    # 1. Initialize the client simply. 
+    # Do not pass 'Settings' objects here to avoid Pydantic validation errors.
+    import chromadb
+    client = chromadb.PersistentClient(path=persist_directory)
+
+    # 2. Use the LangChain wrapper with the existing client
+    # We use 'legal_collection' to ensure consistency
+    vectorstore = Chroma(
+        client=client,
+        collection_name="legal_collection",
+        embedding_function=embeddings,
+    )
+
+    # 3. Check if we need to add data
+    # client.list_collections() returns a list of Collection objects
+    collections = client.list_collections()
+    is_empty = True
+    for col in collections:
+        if col.name == "legal_collection" and col.count() > 0:
+            is_empty = False
+            break
+
+    if is_empty:
         docs = load_and_process_data()
-        batch_size = 5000 
-        vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        with st.status("Indexing documents...", expanded=True) as status:
+        if not docs:
+            st.error("No documents found to index!")
+            st.stop()
+            
+        with st.status("Indexing legal records...", expanded=True) as status:
+            batch_size = 500 
             for i in range(0, len(docs), batch_size):
                 batch = docs[i : i + batch_size]
                 vectorstore.add_documents(batch)
             status.update(label="Indexing Complete!", state="complete")
     
+    # --- LLM and Chain Logic ---
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
         model_name="llama-3.1-8b-instant", 
@@ -69,15 +93,9 @@ def setup_qa_chain():
 
     custom_template = """You are a helpful Indian Legal Assistant. 
     Use the following pieces of retrieved context to answer the user's question.
-    - If the context contains a relevant IPC Section or Court Case, explain it in simple language.
-    - Always cite the Section number or Case title clearly.
-    - If the user asks a follow-up question, use the Chat History to maintain context.
-    - If you cannot find the answer in the context, inform the user you don't have that specific record and suggest consulting a lawyer.
-
     Context: {context}
     Chat History: {chat_history}
     Question: {question}
-    
     Helpful Legal Response:"""
     
     CUSTOM_PROMPT = PromptTemplate(
@@ -92,7 +110,6 @@ def setup_qa_chain():
         combine_docs_chain_kwargs={"prompt": CUSTOM_PROMPT},
         return_source_documents=True
     )
-
 # --- 4. STREAMLIT UI ---
 st.title("⚖️ Indian Legal Assistant")
 st.markdown("Providing legal clarity for the common man using IPC and Case Law data.")
