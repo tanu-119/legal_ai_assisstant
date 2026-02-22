@@ -68,25 +68,47 @@ def load_and_process_data():
 # --- 3. BUILD THE BOT ENGINE ---
 @st.cache_resource 
 def setup_qa_chain():
-    # Use a lightweight embedding model
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     persist_directory = "./legal_db_index"
     
+    # 1. Use the most basic Chroma initialization to avoid Tenant/Database ValueErrors
     if os.path.exists(persist_directory):
-        vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+        try:
+            vectorstore = Chroma(
+                persist_directory=persist_directory, 
+                embedding_function=embeddings
+            )
+        except Exception:
+            # If it fails to load, we'll force a rebuild
+            import shutil
+            shutil.rmtree(persist_directory)
+            vectorstore = None
     else:
+        vectorstore = None
+
+    # 2. Rebuild if vectorstore is None
+    if vectorstore is None:
         docs = load_and_process_data()
         if not docs:
             st.error("No documents found to index!")
             st.stop()
             
-        vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        with st.status("Indexing legal records... (This may take a few minutes)", expanded=True) as status:
-            batch_size = 500  # Smaller batches for better stability on cloud
-            for i in range(0, len(docs), batch_size):
+        # Create a fresh vectorstore
+        vectorstore = Chroma.from_documents(
+            documents=docs[:10], # Start with a small batch to test
+            embedding=embeddings,
+            persist_directory=persist_directory
+        )
+        
+        # Add the rest in batches
+        with st.status("Indexing legal records...", expanded=True) as status:
+            batch_size = 500 
+            for i in range(10, len(docs), batch_size):
                 batch = docs[i : i + batch_size]
                 vectorstore.add_documents(batch)
             status.update(label="Indexing Complete!", state="complete")
+    
+    # ... rest of your code (llm, memory, prompt, etc.) ...
     
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
