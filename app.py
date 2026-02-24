@@ -41,7 +41,7 @@ def load_and_process_data():
                 documents.append(Document(page_content=text, metadata={"source": "ipc_sections.json"}))
                 
     return documents
-# --- 3. BUILD THE BOT ENGINE ---
+# --- 3. CORRECTED BUILD THE BOT ENGINE ---
 @st.cache_resource 
 def setup_qa_chain():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -50,7 +50,6 @@ def setup_qa_chain():
     import chromadb
     from chromadb.config import Settings
     
-    # Force the client to use the default tenant and database settings
     client = chromadb.PersistentClient(
         path=persist_directory,
         settings=Settings(
@@ -62,9 +61,8 @@ def setup_qa_chain():
 
     collection_name = "legal_collection"
     
-    # Try to get the collection, or create it if it doesn't exist
+    # Check if collection exists and has data
     try:
-        # This is more robust than list_collections check
         collection = client.get_or_create_collection(name=collection_name)
         count = collection.count()
     except Exception:
@@ -73,16 +71,17 @@ def setup_qa_chain():
     if count == 0:
         docs = load_and_process_data()
         if not docs:
-            st.error("No documents found to index!")
+            st.error("No documents found in JSON files!")
             st.stop()
-            
-            vectorstore = Chroma.from_documents(
-                documents=docs,
-                embedding=embeddings,
-                client=client,
-                collection_name=collection_name,
-                persist_directory=persist_directory
-            )
+        
+        # FIX: Ensure this is NOT indented under "if not docs"
+        vectorstore = Chroma.from_documents(
+            documents=docs,
+            embedding=embeddings,
+            client=client,
+            collection_name=collection_name,
+            persist_directory=persist_directory
+        )
     else:
         vectorstore = Chroma(
             client=client,
@@ -90,7 +89,7 @@ def setup_qa_chain():
             embedding_function=embeddings,
         )
 
-    # --- Rest of your LLM / Chain Logic remains the same ---
+    # --- LLM / Chain Logic ---
     llm = ChatGroq(
         groq_api_key=GROQ_API_KEY, 
         model_name="llama-3.1-8b-instant", 
